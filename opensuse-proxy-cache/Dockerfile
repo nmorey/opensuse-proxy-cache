@@ -1,71 +1,57 @@
-FROM opensuse/tumbleweed:latest AS ref_repo
+# 1. PLANNER STAGE
+# We use the official Rust image to compute a lock-like file for our dependencies
+FROM rust:1.92-bookworm AS chef
+WORKDIR /app
+RUN cargo install cargo-chef --locked
 
-# RUN zypper mr -d repo-non-oss && \
-#     zypper mr -d repo-oss && \
-#     zypper mr -d repo-update && \
-#     zypper ar http://dl.suse.blackhats.net.au:8080/update/tumbleweed/ repo-update-https && \
-#     zypper ar http://dl.suse.blackhats.net.au:8080/tumbleweed/repo/oss/ repo-oss-https && \
-#     zypper ar http://dl.suse.blackhats.net.au:8080/tumbleweed/repo/non-oss/ repo-non-oss-https && \
-#     zypper --gpg-auto-import-keys ref --force
+# Copy source code (see .dockerignore)
+COPY . .
+# Prepare the recipe (a file describing dependencies)
+RUN cargo chef prepare --recipe-path recipe.json
 
-# FROM opensuse/leap:latest AS ref_repo
-# RUN sed -i -E 's/https?:\/\/download.opensuse.org/https:\/\/mirrorcache.firstyear.id.au/g' /etc/zypp/repos.d/*.repo && \
+# 2. CACHER STAGE
+# We build our dependencies here. This layer is CACHED until Cargo.toml/lock changes.
+FROM rust:1.92-bookworm AS cacher
+WORKDIR /app
+RUN cargo install cargo-chef --locked
+COPY --from=chef /app/recipe.json recipe.json
+# Build dependencies - this is the caching magic!
+RUN cargo chef cook --release --recipe-path recipe.json
 
-RUN sed -i -E 's/https?:\/\/download.opensuse.org/http:\/\/os.int.firstyear.id.au/g' /etc/zypp/repos.d/*.repo && \
-    zypper mr -d repo-openh264 && \
-    zypper --gpg-auto-import-keys ref --force
+# 3. BUILDER STAGE
+# Now we build the actual application
+FROM rust:1.92-bookworm AS builder
+WORKDIR /app
+# Copy compiled dependencies from the cacher stage
+COPY --from=cacher /app/target target
+COPY --from=cacher /usr/local/cargo /usr/local/cargo
+# Copy source code
+COPY . .
+# Build the binary
+RUN cargo build --release  -p opensuse-proxy-cache
 
-# // setup the builder pkgs
-FROM ref_repo AS build_base
-RUN zypper install -y cargo rust gcc sqlite3-devel libopenssl-3-devel sccache perl make
+# 4. RUNTIME STAGE
+# We use a minimal Linux image to run the binary.
+# debian:bookworm-slim is a safe choice (uses glibc).
+# For smaller images (but harder debugging), use gcr.io/distroless/cc-debian12
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
 
-# // setup the runner pkgs
-FROM ref_repo AS run_base
-RUN zypper install -y sqlite3 openssl-3 timezone iputils iproute2 curl \
-    ipxe-bootimgs
+# Install OpenSSL if your app needs it (very common in Rust web apps)
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends openssl ca-certificates curl \
+    && apt-get autoremove -y \
+    && apt-get clean -y \
+    && rm -rf /var/lib/apt/lists/*
 
-# memtest86+
+# Copy the binary from the builder stage
+COPY --from=builder /app/target/release/opensuse-proxy-cache /bin/
 
-# COPY ipxe-bootimgs-1.21.1+git20240329.764e34f-0.x86_64.rpm /usr/share/ipxe-bootimgs.rpm
-# RUN zypper install -y --allow-unsigned-rpm /usr/share/ipxe-bootimgs.rpm
-
-COPY SUSE_CA_Root.pem /etc/pki/trust/anchors/
-RUN /usr/sbin/update-ca-certificates
-
-# RUN cp /boot/efi/EFI/memtest86/memtest.efi /usr/share/ipxe/memtest.efi
-COPY memtest64.7.00.efi /usr/share/ipxe/memtest.efi
-
-# // build artifacts
-FROM build_base AS builder
-
-COPY . /home/proxy/
-# RUN mkdir /home/proxy/.cargo
-# COPY cargo_config /home/proxy/.cargo/config.toml
-WORKDIR /home/proxy/
-
-# RUSTFLAGS="-Ctarget-cpu=x86-64-v3"
-#
-
-RUN if [ "$(uname -i)" = "x86_64" ]; then export RUSTFLAGS="-Ctarget-cpu=x86-64-v3 --cfg tokio_unstable"; fi && \
-    RUST_BACKTRACE=full \
-    SCCACHE_REDIS=redis://redis.firstyear.id.au:6379 \
-    RUSTC_WRAPPER=sccache \
-    cargo build -p opensuse-proxy-cache --release
-
-# == end builder setup, we now have static artifacts.
-FROM run_base
-MAINTAINER william@blackhats.net.au
 EXPOSE 8080
 EXPOSE 8443
 WORKDIR /
 
-# RUN cd /etc && \
-#     ln -sf ../usr/share/zoneinfo/Australia/Brisbane localtime
-
-COPY --from=builder /home/proxy/target/release/opensuse-proxy-cache /bin/
-
 HEALTHCHECK --interval=15s --timeout=2s --start-period=8m CMD sh -c "curl -f http://localhost:8080/_status || exit 1"
 STOPSIGNAL SIGINT
 
-ENV RUST_BACKTRACE 1
 CMD ["/bin/opensuse-proxy-cache"]
