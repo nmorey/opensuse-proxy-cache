@@ -973,6 +973,7 @@ async fn monitor_upstream(
     client: reqwest::Client,
     mirror_chain: Option<Url>,
     mut rx: broadcast::Receiver<bool>,
+    interval: u64,
 ) {
     info!(immediate = true, "Spawning upstream monitor task ...");
 
@@ -1058,7 +1059,7 @@ async fn monitor_upstream(
                 .instrument(tracing::info_span!("monitor_upstream"))
                 .await;
 
-                sleep(Duration::from_secs(5)).await;
+                sleep(Duration::from_secs(interval)).await;
             }
             _ => {
                 break;
@@ -1307,6 +1308,14 @@ struct Config {
     #[arg(env = "OAUTH2_SERVER_URL", long = "oauth_server_url")]
     /// Oauth server url - the url of the authorisation provider
     oauth_server_url: Option<String>,
+
+    #[arg(
+        env = "UPSTREAM_MONITOR_INTERVAL",
+        default_value = "5",
+        long = "upstream-monitor-interval"
+    )]
+    /// Interval in seconds to check upstream availability
+    upstream_monitor_interval: u64,
 }
 
 async fn do_main() {
@@ -1449,8 +1458,9 @@ async fn do_main() {
 
     let monitor_rx = tx.subscribe();
     let monitor_client = client.clone();
+    let monitor_interval = config.upstream_monitor_interval;
     let monitor_handle = tokio::task::spawn(async move {
-        monitor_upstream(monitor_client, mirror_chain, monitor_rx).await
+        monitor_upstream(monitor_client, mirror_chain, monitor_rx, monitor_interval).await
     });
 
     let prefetch_bcast_rx = tx.subscribe();
