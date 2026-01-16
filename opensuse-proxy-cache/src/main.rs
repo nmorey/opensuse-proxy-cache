@@ -4,7 +4,7 @@ extern crate tracing;
 mod cache;
 mod constants;
 
-use askama::Template;
+
 
 use crate::cache::*;
 use crate::constants::*;
@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tempfile::NamedTempFile;
 use tokio::fs::File;
-use tokio::io::{BufReader, BufStream, AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -58,7 +58,7 @@ struct AppState {
     client: reqwest::Client,
     // oauth: Option<auth::BasicClient>,
     prefetch_tx: Sender<PrefetchReq>,
-    boot_origin: Url,
+
     geoip_db: maxminddb::Reader<&'static [u8; 9853267]>,
 }
 
@@ -72,7 +72,7 @@ impl AppState {
         mirror_chain: Option<Url>,
         client: reqwest::Client,
         prefetch_tx: Sender<PrefetchReq>,
-        boot_origin: Url,
+
         geoip_db: maxminddb::Reader<&'static [u8; 9853267]>,
     ) -> std::io::Result<Self> {
         let cache = Cache::new(
@@ -88,7 +88,7 @@ impl AppState {
             cache,
             client,
             prefetch_tx,
-            boot_origin,
+
             geoip_db,
         })
     }
@@ -1143,62 +1143,7 @@ async fn prefetch_task(
     info!(immediate = true, "Stopping prefetch task.");
 }
 
-async fn ipxe_static(extract::Path(fname): extract::Path<PathBuf>) -> Response {
-    #[cfg(target_os = "linux")]
-    const IPXE_PATH: &str = "/usr/share/ipxe";
-    #[cfg(target_os = "freebsd")]
-    const IPXE_PATH: &str = "/usr/local/share/ipxe";
 
-    let Some(rel_fname) = fname.file_name() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    // Get the abs path.
-    let abs_path = Path::new(IPXE_PATH).join(rel_fname);
-
-    let n_file = match File::open(&abs_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            error!("{:?}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    let stream = Body::from_stream(ReaderStream::new(BufReader::with_capacity(
-        BUFFER_READ_PAGE,
-        n_file,
-    )));
-
-    (StatusCode::OK, stream).into_response()
-}
-
-#[derive(Template)]
-#[template(path = "ipxe.menu.html")]
-struct IpxeMenuTemplate<'a> {
-    mirror_uri: &'a str,
-}
-
-#[axum::debug_handler]
-async fn ipxe_menu_view(
-    _headers: HeaderMap,
-    extract::State(state): extract::State<Arc<AppState>>,
-) -> Response {
-    let menu = IpxeMenuTemplate {
-        mirror_uri: state.boot_origin.as_str(),
-    }
-    .render()
-    .unwrap();
-
-    // error!("ipxe request_headers -> {:?}", headers);
-    // ipxe request_headers -> {"connection": "keep-alive", "user-agent": "iPXE/1.21.1+git20231006.ff0f8604", "host": "172.24.11.130:8080"}
-
-    // https://ipxe.org/cfg
-    // https://ipxe.org/cmd/
-
-    // set mirror-uri ${cwduri}
-
-    menu.into_response()
-}
 
 async fn robots_view() -> Html<&'static str> {
     Html(
@@ -1272,18 +1217,6 @@ struct Config {
     #[arg(default_value = "[::]:8080", env = "BIND_ADDRESS", long = "addr")]
     /// Address to listen to for http
     bind_addr: String,
-
-    #[arg(long = "boot-services", env = "BOOT_SERVICES")]
-    /// Enable a tftp server for pxe boot services
-    boot_services: bool,
-
-    #[arg(
-        env = "BOOT_ORIGIN",
-        default_value = "http://localhost:8080",
-        long = "boot_origin"
-    )]
-    /// The external URL of this server as seen by boot service clients
-    boot_origin: Url,
 
     #[arg(env = "TLS_BIND_ADDRESS", long = "tlsaddr")]
     /// Address to listen to for https (optional)
@@ -1376,7 +1309,6 @@ async fn do_main() {
         mirror_chain.clone(),
         client.clone(),
         prefetch_tx,
-        config.boot_origin.clone(),
         geoip_db,
     );
 
@@ -1392,8 +1324,6 @@ async fn do_main() {
         .route("/", get(get_view).head(head_view))
         .route("/_status", get(status_view))
         .route("/robots.txt", get(robots_view))
-        .route("/menu.ipxe", get(ipxe_menu_view))
-        .route("/ipxe/{fname}", get(ipxe_static))
         .route("/{*req_path}", get(get_view).head(head_view))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -1500,28 +1430,7 @@ async fn do_main() {
         info!("Server has stopped!");
     });
 
-    let mut boot_services_rx = tx.subscribe();
 
-    let maybe_tftp_handle = if config.boot_services {
-        let tftp_handle = tokio::task::spawn(async move {
-            let tftpd = async_tftp::server::TftpServerBuilder::with_dir_ro("/usr/share/ipxe/")
-                .expect("Unable to build tftp server")
-                .build()
-                .await
-                .expect("Unable to build tftp server");
-            info!("Starting TFTP");
-            tokio::select! {
-                _ = boot_services_rx.recv() => {
-                    return
-                }
-                _ = tftpd.serve() => {}
-            }
-            info!("TFTP Server has stopped!");
-        });
-        Some(tftp_handle)
-    } else {
-        None
-    };
 
     // Block for signals now
 
@@ -1544,9 +1453,6 @@ async fn do_main() {
 
     let _ = monitor_handle.await;
     let _ = prefetch_handle.await;
-    if let Some(tftp_handle) = maybe_tftp_handle {
-        let _ = tftp_handle.await;
-    }
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 20)]
