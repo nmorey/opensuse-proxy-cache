@@ -1082,17 +1082,26 @@ async fn prefetch_task(
     state: Arc<AppState>,
     mut prefetch_rx: Receiver<PrefetchReq>,
     mut rx: broadcast::Receiver<bool>,
+    interval: u64,
 ) {
     info!(immediate = true, "Spawning prefetch task ...");
 
     let mut req_cache = LruCache::new(NonZeroUsize::new(64).unwrap());
 
-    while matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)) {
+    loop {
+        // Check if we are shutting down
+        if !matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)) {
+             break;
+        }
+
         async {
         tokio::select! {
-            _ = sleep(Duration::from_secs(5)) => {
+            _ = sleep(Duration::from_secs(interval)) => {
                 // Do nothing, this is to make us loop and check the running state.
                 info!("prefetch loop idle");
+            }
+            _ = rx.recv() => {
+                info!("prefetch loop shutdown signal received");
             }
             got = prefetch_rx.recv() => {
                 match got {
@@ -1316,6 +1325,14 @@ struct Config {
     )]
     /// Interval in seconds to check upstream availability
     upstream_monitor_interval: u64,
+
+    #[arg(
+        env = "PREFETCH_INTERVAL",
+        default_value = "60",
+        long = "prefetch-interval"
+    )]
+    /// Interval in seconds to check for prefetch loop idle
+    prefetch_interval: u64,
 }
 
 async fn do_main() {
@@ -1465,8 +1482,9 @@ async fn do_main() {
 
     let prefetch_bcast_rx = tx.subscribe();
     let prefetch_app_state = app_state.clone();
+    let prefetch_interval = config.prefetch_interval;
     let prefetch_handle = tokio::task::spawn(async move {
-        prefetch_task(prefetch_app_state, prefetch_rx, prefetch_bcast_rx).await
+        prefetch_task(prefetch_app_state, prefetch_rx, prefetch_bcast_rx, prefetch_interval).await
     });
 
     let server_handle = tokio::task::spawn(async move {
