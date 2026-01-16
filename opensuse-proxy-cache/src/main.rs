@@ -1474,10 +1474,7 @@ async fn main() {
     // let fmt_layer = tracing_subscriber::fmt::layer();
     // .with_target(true);
 
-    // let console_layer = ConsoleLayer::builder().with_default_env().spawn();
-
     Registry::default()
-        // .with(console_layer)
         .with(filter_layer)
         .with(fmt_layer)
         .init();

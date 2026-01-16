@@ -599,17 +599,7 @@ impl Cache {
         }
     }
 
-    pub fn clear_nxcache(&self, etime: OffsetDateTime) {
-        warn!("NXCACHE CLEAR REQUESTED");
-        self.pri_cache.update_all_userdata(
-            |d: &Status| d.nxtime.is_some(),
-            |d: &mut Status| {
-                if d.nxtime.is_some() {
-                    d.nxtime = Some(etime);
-                }
-            },
-        )
-    }
+
 }
 
 async fn cache_stats(pri_cache: ArcDiskCache<String, Status>) {

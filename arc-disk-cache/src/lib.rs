@@ -488,7 +488,7 @@ where
         let maybe_obj = rtxn
             .get(q)
             .and_then(|obj| {
-                let mut file = File::open(&obj.fhandle.path).ok()?;
+                let file = File::open(&obj.fhandle.path).ok()?;
 
                 let amt = file
                     .metadata()
